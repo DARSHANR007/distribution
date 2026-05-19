@@ -20,6 +20,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -117,6 +118,7 @@ type DriverParameters struct {
 	Accelerate                  bool
 	UseFIPSEndpoint             bool
 	LogLevel                    aws.LogLevelType
+	RedirectEndpoint            string
 }
 
 func init() {
@@ -165,6 +167,7 @@ type driver struct {
 	RootDirectory               string
 	StorageClass                string
 	ObjectACL                   string
+	RedirectEndpoint            string
 	pool                        *sync.Pool
 }
 
@@ -335,6 +338,11 @@ func FromParameters(ctx context.Context, parameters map[string]any) (*Driver, er
 		return nil, err
 	}
 
+	redirectEndpoint := parameters["redirectendpoint"]
+	if redirectEndpoint == nil {
+		redirectEndpoint = ""
+	}
+
 	params := DriverParameters{
 		AccessKey:                   fmt.Sprint(accessKey),
 		SecretKey:                   fmt.Sprint(secretKey),
@@ -360,6 +368,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (*Driver, er
 		Accelerate:                  accelerateBool,
 		UseFIPSEndpoint:             useFIPSEndpointBool,
 		LogLevel:                    getS3LogLevelFromParam(parameters["loglevel"]),
+		RedirectEndpoint:            fmt.Sprint(redirectEndpoint),
 	}
 
 	return New(ctx, params)
@@ -532,6 +541,7 @@ func New(ctx context.Context, params DriverParameters) (*Driver, error) {
 		RootDirectory:               params.RootDirectory,
 		StorageClass:                params.StorageClass,
 		ObjectACL:                   params.ObjectACL,
+		RedirectEndpoint:            params.RedirectEndpoint,
 		pool: &sync.Pool{
 			New: func() any { return &bytes.Buffer{} },
 		},
@@ -1039,6 +1049,17 @@ func (d *driver) RedirectURL(r *http.Request, path string) (string, error) {
 		})
 	default:
 		return "", nil
+	}
+
+	// If a public redirect endpoint is configured, use it for the signed URL
+	// This allows using a different public endpoint for downloads with signed URLs
+	if d.RedirectEndpoint != "" && req != nil && req.HTTPRequest != nil {
+		u, err := url.Parse(d.RedirectEndpoint)
+		if err == nil {
+			// Override the request URL host and scheme with the public endpoint
+			req.HTTPRequest.URL.Host = u.Host
+			req.HTTPRequest.URL.Scheme = u.Scheme
+		}
 	}
 
 	return req.Presign(expiresIn)
