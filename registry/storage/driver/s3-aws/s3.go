@@ -167,7 +167,7 @@ type driver struct {
 	RootDirectory               string
 	StorageClass                string
 	ObjectACL                   string
-	RedirectEndpoint            string
+	RedirectEndpoint            *url.URL
 	pool                        *sync.Pool
 }
 
@@ -541,10 +541,32 @@ func New(ctx context.Context, params DriverParameters) (*Driver, error) {
 		RootDirectory:               params.RootDirectory,
 		StorageClass:                params.StorageClass,
 		ObjectACL:                   params.ObjectACL,
-		RedirectEndpoint:            params.RedirectEndpoint,
 		pool: &sync.Pool{
 			New: func() any { return &bytes.Buffer{} },
 		},
+	}
+
+	if params.RedirectEndpoint != "" {
+		u, err := url.Parse(params.RedirectEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse redirectendpoint: %w", err)
+		}
+		if u.Scheme == "" {
+			return nil, fmt.Errorf("no scheme specified for redirectendpoint")
+		}
+		if u.Host == "" {
+			return nil, fmt.Errorf("no host specified for redirectendpoint")
+		}
+		// Edge Case: Reject trailing paths (e.g., /cdn/v1) because the hot path ignores them
+		if u.Path != "" && u.Path != "/" {
+			return nil, fmt.Errorf("redirectendpoint cannot contain a base path: %s", u.Path)
+		}
+		// Edge Case: Reject query parameters because they break AWS SigV4 signatures
+		if u.RawQuery != "" {
+			return nil, fmt.Errorf("redirectendpoint cannot contain query parameters")
+		}
+
+		d.RedirectEndpoint = u
 	}
 
 	return &Driver{
@@ -1053,13 +1075,9 @@ func (d *driver) RedirectURL(r *http.Request, path string) (string, error) {
 
 	// If a public redirect endpoint is configured, use it for the signed URL
 	// This allows using a different public endpoint for downloads with signed URLs
-	if d.RedirectEndpoint != "" && req != nil && req.HTTPRequest != nil {
-		u, err := url.Parse(d.RedirectEndpoint)
-		if err == nil {
-			// Override the request URL host and scheme with the public endpoint
-			req.HTTPRequest.URL.Host = u.Host
-			req.HTTPRequest.URL.Scheme = u.Scheme
-		}
+	if d.RedirectEndpoint != nil && req.HTTPRequest != nil {
+		req.HTTPRequest.URL.Host = d.RedirectEndpoint.Host
+		req.HTTPRequest.URL.Scheme = d.RedirectEndpoint.Scheme
 	}
 
 	return req.Presign(expiresIn)
